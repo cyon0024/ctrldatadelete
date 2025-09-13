@@ -1,0 +1,264 @@
+---
+title: "loreal1"
+format: html
+editor: visual
+---
+
+```{r}
+#install.packages("tidytext")
+#install.packages("tm")
+#install.packages("SnowballC")
+#install.packages("wordcloud")
+#install.packages("topicmodels")
+#install.packages("textdata")
+#install.packages("quanteda")
+#install.packages("seededlda")
+#install.packages("quanteda.textmodels")
+```
+
+```{r}
+library(tidyverse)
+library(tidytext)
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(topicmodels)
+library(textdata)
+library(dplyr)
+library(quanteda)
+library(seededlda)
+library(quanteda.textmodels)
+```
+
+```{r}
+loreal <- read.csv("videos.csv")
+
+glimpse(loreal)
+```
+
+```{r}
+loreal_1 <- na.omit(loreal)
+summary(loreal)
+colSums(is.na(loreal))
+```
+
+```{r}
+#clean missing value by replacing with mean value
+mean_view <- mean(loreal$viewCount, na.rm = TRUE)
+loreal$viewCount <- ifelse(is.na(loreal$viewCount), mean_view, loreal$viewCount)
+
+mean_like <- mean(loreal$likeCount, na.rm = TRUE)
+loreal$likeCount <- ifelse(is.na(loreal$likeCount), mean_like, loreal$likeCount)
+
+mean_favourite <- mean(loreal$favouriteCount, na.rm = TRUE)
+loreal$favouriteCount <- ifelse(is.na(loreal$favouriteCount), mean_favourite, loreal$favouriteCount)
+
+mean_comment <- mean(loreal$commentCount, na.rm = TRUE)
+loreal$commentCount <- ifelse(is.na(loreal$commentCount), mean_comment, loreal$commentCount)
+
+
+summary(loreal) 
+colSums(is.na(loreal))
+```
+
+```{r}
+#put NA for each missing cells
+loreal$description[loreal$description == "" | is.na(loreal$description)] <- "NA"
+loreal$tags[loreal$tags == "" | is.na(loreal$tags)] <- "NA"
+loreal$defaultLanguage[loreal$defaultLanguage == "" | is.na(loreal$defaultLanguage)] <- "NA"
+loreal$defaultAudioLanguage[loreal$defaultAudioLanguage == "" | is.na(loreal$defaultAudioLanguage)] <- "NA"
+
+head(loreal)
+```
+
+```{r}
+text <- loreal$title
+
+head(text)
+```
+
+```{r}
+# Dictionary of keywords per category
+dict <- list(
+  skincare = c("skin", "tone", "dry",'glow','mask','serum'),
+  hair = c("hair", "shampoo","dye","transformation","color","smooth"),
+  beauty = c("makeup", "lip", "eye","wrinkle","perfume","cosmetic"),
+  review = c("price", "affordable","expensive","short","better")
+)
+```
+
+```{r}
+# Convert to tibble for tidytext
+text_df <- tibble(id = 1:length(text), text = text)
+```
+
+```{r}
+corp <- corpus(loreal, text_field = "title")
+```
+
+```{r}
+toks <- tokens(
+  corp,
+  remove_punct = TRUE,
+  remove_numbers = TRUE
+) %>%
+  tokens_remove(pattern = stopwords("english")) %>%
+  tokens_wordstem(language = "english")
+```
+
+```{r}
+# Apply dictionary
+dfm_dict <- dfm(toks)
+dfm_class <- dfm_lookup(dfm_dict, dictionary = dictionary(dict))
+```
+
+```{r}
+# Combine results
+classified <- cbind(docvars(corp), convert(dfm_class, to = "data.frame"))
+classified
+```
+
+```{r}
+# Tokenize & remove stopwords
+tokens_sent <- loreal %>%
+  unnest_tokens(word, title) %>%
+  anti_join(stop_words, by = "word")
+```
+
+```{r}
+# Use "bing" lexicon (positive/negative classification)
+sentiment_data <- tokens_sent %>%
+  inner_join(get_sentiments("bing"), by = "word")
+
+sentiment_data
+```
+
+```{r}
+# Count positive and negative words per document
+sentiment_summary <- sentiment_data %>%
+  count(channelId, sentiment) %>%
+  tidyr::spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment_score = positive - negative)
+
+sentiment_summary
+```
+
+```{r}
+library(ggplot2)
+
+sentiment_data %>%
+  count(word, sentiment, sort = TRUE) %>%
+  group_by(sentiment) %>%
+  top_n(10, n) %>%
+  ggplot(aes(x = reorder(word, n), y = n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  coord_flip() +
+  labs(title = "Top Contributing Words to Sentiment",
+       x = "Word", y = "Count")
+
+```
+
+From the graph, it can be observed that positive words are more than negative words in comment, showing that Loreal's product got a general good reviews accordingly. By analyzing the positive words, it is mostly related with 'beauty', 'glow', 'beautiful'. This suggests that the beauty products gain a high attention from public. This can be supported by the words: 'glow', 'beautiful', 'love' showing that they really did well in their beauty-related products in terms of product review. While looking at the negative words, it is most related to the words like 'hack', 'dark', 'mist'. This provides insight that the beauty or make-up products may not long-lasting enough and oxidated to become dark. Moreove, 'mist' and 'wrinkles' may suggest that the hydrating effect of mist may need improvement and the effect of reduce wrinkles is not obvious.
+
+```{r}
+# Create a DFM for topic modelling 
+dfm_clean <- dfm(toks)
+
+# Apply dictionary
+dfm_dict <- dfm_lookup(dfm_clean, dictionary = dictionary(dict))
+
+# Assign category per doc (highest match)
+doc_category <- apply(dfm_dict, 1, function(x) {
+  if(all(x == 0)) return("none")
+  else return(names(which.max(x)))
+})
+```
+
+```{r}
+# Add to dataframe
+loreal$topicCategories <- doc_category
+
+# Run topic modelling for each category
+results <- list()
+for(cat in unique(loreal$topicCategories)) {
+  if(cat != "none") {
+    dtm_cat <- convert(dfm_subset(dfm_clean, loreal$topicCategorie == cat), to = "topicmodels")
+    lda_cat <- LDA(dtm_cat, k = 3, control = list(seed = 1234))
+    results[[cat]] <- lda_cat
+  }
+}
+
+# Inspect skincare topics
+terms(results$skincare, 10)
+```
+
+```{r}
+# Use dfm directly, not convert()
+# dfm_clean is already your cleaned dfm
+seedwords <- dictionary(list(
+  skincare = c("skin", "tone", "dry", "glow", "mask", "serum"),
+  hair = c("hair", "shampoo", "dye", "transformation", "color", "smooth"),
+  beauty = c("makeup", "lip", "eye", "wrinkle", "perfume", "cosmetic"),
+  review = c("price", "affordable", "expensive", "short", "better")
+))
+
+# Train seeded LDA
+set.seed(123)
+model <- textmodel_seededlda(dfm_clean, dictionary = seedwords)
+
+# Show top words per seeded topic
+terms(model, 30)
+```
+
+```{r}
+# Document-topic probabilities matrix
+doc_topics <- model$theta
+head(doc_topics)
+```
+
+```{r}
+# doc_topics is the matrix of probabilities from model$theta
+doc_topics <- model$theta  
+
+# Find the topic with the highest probability for each document
+doc_max <- apply(doc_topics, 1, which.max)
+
+# Convert index (1,2,3,4) into topic names (skincare, hair, beauty, review)
+doc_category <- names(seedwords)[doc_max]
+
+# Combine back with original text (assuming your dataset is called df with a column 'text')
+results <- data.frame(
+  text = loreal$title,                # original text
+  dominant_topic = doc_category, # assigned category
+  doc_topics                     # include full probabilities
+)
+
+# Preview results
+head(results, 10)
+```
+
+```{r}
+# Count how many documents fall into each topic
+summary_table <- table(results$dominant_topic)
+summary_table
+
+# If you want it as a dataframe
+summary_df <- as.data.frame(summary_table)
+colnames(summary_df) <- c("Topic", "Document_Count")
+
+# Preview
+print(summary_df)
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(summary_df, aes(x = Topic, y = Document_Count, fill = Topic)) +
+  geom_col(show.legend = FALSE) +
+  labs(title = "Document Distribution Across Topics",
+       x = "Topic",
+       y = "Number of Documents") +
+  theme_minimal()
+
+```
